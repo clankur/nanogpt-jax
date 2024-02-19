@@ -83,7 +83,8 @@ class FeedForward (eqx.Module):
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),
             jax.nn.relu,
-            nn.Linear(4 * n_embd, n_embd)
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout)
         )
 
     def forward (self, x: jnp.ndarray) -> jnp.ndarray:
@@ -109,7 +110,7 @@ class Block (eqx.Module):
         x = x + self.ffwd(self.ln2(x))
         return x, kvcache
 
-class NanoGptModel (eqx.Module):
+class GPTLanguageModel (eqx.Module):
     token_embedding_table: nn.Embedding
     position_embedding_table: nn.Embedding
     blocks: List[Block]

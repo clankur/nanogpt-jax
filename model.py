@@ -24,6 +24,10 @@ itos = {i: ch for i, ch in enumerate(chars)}
 encode = lambda s: [stoi[c] for c in s]
 decode = lambda l: ''.join([itos[i] for i in l])
 
+data = jnp.array(encode(text), dtype=jnp.int32)
+n = int(0.9 * len(data))
+train_data, val_data = data[:n], data[n:]
+
 def cross_entropy (y_true: jnp.ndarray, y_pred: jnp.ndarray) -> jnp.ndarray:
     return -jnp.sum(y_true * jnp.log(y_pred))
 
@@ -152,4 +156,19 @@ class GPTLanguageModel (eqx.Module):
         if use_cache:
             return logits, loss, new_kvcaches
         return logits, loss
-        
+
+    def generate (self, idx: jnp.ndarray, max_new_tokens: int) -> jnp.ndarray:
+        curr_idx = idx
+        blocks_kvcache = [None] * n_layer
+
+        for _ in range(max_new_tokens):
+            logits, _, blocks_kvcache = self(curr_idx, use_cache=True, blocks_kvcache=blocks_kvcache)
+            last_token_logits = logits[:, -1, :]
+            probs = jax.nn.softmax(last_token_logits, axis=-1)
+            # sample and get the new token
+            key = jax.random.PRNGKey(0)
+            idx_next = jax.random.categorical(key, probs, axis=-1)
+
+            curr_idx = idx_next
+            idx = jnp.concatenate([idx, idx_next], axis=-1)
+        return idx

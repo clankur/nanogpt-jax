@@ -24,6 +24,9 @@ itos = {i: ch for i, ch in enumerate(chars)}
 encode = lambda s: [stoi[c] for c in s]
 decode = lambda l: ''.join([itos[i] for i in l])
 
+def cross_entropy (y_true: jnp.ndarray, y_pred: jnp.ndarray) -> jnp.ndarray:
+    return -jnp.sum(y_true * jnp.log(y_pred))
+
 class MultiHeadAttention(eqx.Module):
     num_heads: int
     head_size: int
@@ -144,7 +147,7 @@ class GPTLanguageModel (eqx.Module):
         else:
             B, T, C = logits.shape
             logits, targets = logits.reshape(B*T, C), targets.reshape(B*T)
-            loss = -jax.nn.log_softmax(logits, axis=-1)[jnp.arange(B*T), targets]
+            loss = cross_entropy(targets, logits)
         
         if use_cache:
             return logits, loss, new_kvcaches

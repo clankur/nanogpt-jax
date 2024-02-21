@@ -1,9 +1,12 @@
 import jax
 import jax.numpy as jnp
 import equinox as eqx
-import equinox.nn as nn
+import optax
+from flax import serialization
+
 from clearml import Task
 from typing import Optional, List, Tuple
+from jaxtyping import PyTree 
 import datetime
 
 from model import GPTLanguageModel, encode, decode, train_data, val_data, block_size
@@ -43,9 +46,23 @@ if __name__ == "__main__":
     task.execute_remotely('default', clone=False, exit_process=True)
 
     model = GPTLanguageModel()
+    
+    params = model.init(jax.random.PRNGKey(0), jnp.ones((1, block_size)))
 
     # create a jax optimizer
-    # optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
+    optimizer = optax.adam(learning_rate)
+    opt_state = optimizer.init(params)
+
+    @jax.jit
+    def update(params, opt_state, xb, yb):
+        logits, loss = model.apply(params, xb, yb)
+        # compute gradients
+        grads = jax.grad(lambda p, x, y: model.apply(p, x, y)[1])(params, xb, yb) # compute gradients
+
+        # apply updates based on grads
+        updates, opt_state = optimizer.update(grads, opt_state)
+        params = optax.apply_updates(params, updates) # update parameters
+        return params, opt_state, loss
 
     # training the model
     for steps in range(max_epochs):
@@ -56,10 +73,9 @@ if __name__ == "__main__":
             task.get_logger().report_scalar(title="losses", series="val", value=losses['val'], iteration=steps)
         
         xb, yb = get_batch('train')
-        logits, loss = model(xb, yb)
+        params, opt_state, loss = update(params, opt_state, xb, yb)
 
         task.get_logger().report_scalar(title="losses", series="train", value=loss, iteration=steps)
-
-        # optimizer.zero_grad(set_to_none=True) # clear the gradients
-        # loss.backward() # compute gradients
-        # optimizer.step() # update parameters
+        
+    with open('model_weights.msgpack', 'wb') as f:
+        f.write(serialization.to_bytes(params))

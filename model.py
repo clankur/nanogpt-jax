@@ -118,14 +118,28 @@ class Block (eqx.Module):
         return x, kvcache
 
 class GPTLanguageModel (eqx.Module):
+    key: jnp.ndarray
+    block_size: int
+    vocab_size: int
+    n_embd: int
+    n_head: int
+    n_layer: int
+
     token_embedding_table: nn.Embedding
     position_embedding_table: nn.Embedding
     blocks: List[Block]
     ln_f: nn.LayerNorm
     lm_head: nn.Linear
 
-    def __init__ (self) -> None:
+    def __init__ (self, key: jnp.ndarray, block_size: int, vocab_size: int, n_embd: int, n_head: int, n_layer: int) -> None:
         super().__init__()
+        self.key = key
+        self.block_size = block_size
+        self.vocab_size = vocab_size
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.n_layer = n_layer
+
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
         self.blocks = [Block(n_embd, n_head) for _ in range(n_layer)]
@@ -166,8 +180,7 @@ class GPTLanguageModel (eqx.Module):
             last_token_logits = logits[:, -1, :]
             probs = jax.nn.softmax(last_token_logits, axis=-1)
             # sample and get the new token
-            key = jax.random.PRNGKey(0)
-            idx_next = jax.random.categorical(key, probs, axis=-1)
+            idx_next = jax.random.categorical(self.key, probs, axis=-1)
 
             curr_idx = idx_next
             idx = jnp.concatenate([idx, idx_next], axis=-1)

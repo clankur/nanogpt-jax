@@ -2,14 +2,22 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
-from flax import serialization
 
+import json
 from clearml import Task
 from typing import Optional, List, Tuple
 from jaxtyping import PyTree 
-import datetime
+from datetime import datetime
 
-from model import GPTLanguageModel, encode, decode, train_data, val_data, block_size
+from model import GPTLanguageModel, encode, decode, train_data, val_data, block_size, vocab_size
+
+hyperparams = {
+    "block_size": 256,
+    "n_embd": 384,
+    "n_head": 6,
+    "n_layer": 6,
+    "vocab_size": vocab_size
+}
 
 batch_size = 64
 learning_rate = 3e-4
@@ -35,6 +43,21 @@ def estimate_loss(model) -> dict:
         out[split] = losses.mean()
     return out
 
+def make(*, key: jnp.ndarray, block_size: int, n_embd: int, n_head: int, n_layer: int, vocab_size: int) -> GPTLanguageModel:
+    return GPTLanguageModel(key=key, block_size=block_size, n_embd=n_embd, n_head=n_head, n_layer=n_layer, vocab_size=vocab_size)
+
+def save(filename, hyperparams, model):
+    with open(filename, "wb") as f:
+        hyperparam_str = json.dumps(hyperparams)
+        f.write((hyperparam_str + "\n").encode())
+        eqx.tree_serialise_leaves(f, model)
+
+def load(filename):
+    with open(filename, "rb") as f:
+        hyperparams = json.loads(f.readline().decode())
+        model = make(key=jax.random.PRNGKey(0), **hyperparams)
+        return eqx.tree_deserialise_leaves(f, model)
+
 if __name__ == "__main__":
         
     # Get the current date and time
@@ -45,10 +68,9 @@ if __name__ == "__main__":
     task = Task.init(project_name='nanogpt', task_name=formatted_date_time)
     task.execute_remotely('default', clone=False, exit_process=True)
 
-    model = GPTLanguageModel()
+    model = GPTLanguageModel(key=jax.random.PRNGKey(0), **hyperparams)
+    params = model.parameters()
     
-    params = model.init(jax.random.PRNGKey(0), jnp.ones((1, block_size)))
-
     # create a jax optimizer
     optimizer = optax.adam(learning_rate)
     opt_state = optimizer.init(params)
@@ -63,12 +85,16 @@ if __name__ == "__main__":
         updates, opt_state = optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates) # update parameters
         return params, opt_state, loss
+    
+
 
     # training the model
     for steps in range(max_epochs):
         # every once in a while eval loss on train and val sets
         if steps % eval_interval == 0:
             losses = estimate_loss(model)
+            print(f"Step: {steps}, Train loss: {losses['train']:.2f}, Val loss: {losses['val']:.2f}")   
+
             task.get_logger().report_scalar(title="losses", series="train", value=losses['train'], iteration=steps)
             task.get_logger().report_scalar(title="losses", series="val", value=losses['val'], iteration=steps)
         
@@ -76,6 +102,5 @@ if __name__ == "__main__":
         params, opt_state, loss = update(params, opt_state, xb, yb)
 
         task.get_logger().report_scalar(title="losses", series="train", value=loss, iteration=steps)
-        
-    with open('model_weights.msgpack', 'wb') as f:
-        f.write(serialization.to_bytes(params))
+    
+    save("gpt_model.eqx", hyperparams, model)

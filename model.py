@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 import equinox as eqx
 import equinox.nn as nn
 
@@ -28,6 +29,7 @@ data = jnp.array(encode(text), dtype=jnp.int32)
 n = int(0.9 * len(data))
 train_data, val_data = data[:n], data[n:]
 
+@eqx.filter_value_and_grad
 def cross_entropy (y_true: jnp.ndarray, y_pred: jnp.ndarray) -> jnp.ndarray:
     return -jnp.sum(y_true * jnp.log(y_pred))
 
@@ -41,15 +43,18 @@ class MultiHeadAttention(eqx.Module):
     dropout: nn.Dropout
     tril: jnp.ndarray
 
-    def __init__ (self, num_heads: int, head_size: int) -> None:
+    def __init__ (self, jr_key: jnp.ndarray, num_heads: int, head_size: int) -> None:
         super().__init__()
+
+        k_key, q_key, v_key, proj_key = jr.split(jr_key, 4)
+
         self.num_heads = num_heads
         self.head_size = head_size
 
-        self.key = nn.Linear(n_embd, n_embd, bias=False)
-        self.query = nn.Linear(n_embd, n_embd, bias=False)
-        self.value = nn.Linear(n_embd, n_embd, bias=False)
-        self.proj = nn.Linear(n_embd, n_embd)
+        self.key = nn.Linear(n_embd, n_embd, use_bias=False, key=k_key)
+        self.query = nn.Linear(n_embd, n_embd, use_bias=False, key=q_key)
+        self.value = nn.Linear(n_embd, n_embd, use_bias=False, key=v_key)
+        self.proj = nn.Linear(n_embd, n_embd, key=proj_key)
         self.dropout = nn.Dropout(dropout)
 
         self.tril = jnp.tril(jnp.ones((1, 1, block_size, block_size)))
@@ -83,16 +88,18 @@ class MultiHeadAttention(eqx.Module):
         return out, kvcache
 
 class FeedForward (eqx.Module):
+    jr_key: jnp.ndarray
     net: nn.Sequential
 
-    def __init__ (self, n_embd: int) -> None:
+    def __init__ (self, key: jnp.ndarray, n_embd: int) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
+        linear_keys = jr.split(key, 2)
+        self.net = nn.Sequential([
+            nn.Linear(n_embd, 4 * n_embd, key=linear_keys[0]),
             jax.nn.relu,
-            nn.Linear(4 * n_embd, n_embd),
+            nn.Linear(4 * n_embd, n_embd, key=linear_keys[1]),
             nn.Dropout(dropout)
-        )
+        ])
 
     def forward (self, x: jnp.ndarray) -> jnp.ndarray:
         return self.net(x)
@@ -103,11 +110,14 @@ class Block (eqx.Module):
     ln1: nn.LayerNorm
     ln2: nn.LayerNorm
 
-    def __init__ (self, n_embd: int, n_head: int) -> None:
+    def __init__ (self, key: jnp.ndarray, n_embd: int, n_head: int) -> None:
         super().__init__()
+        
+        ffwd_key, att_key = jr.split(key, 2)
+        
         head_size = n_embd // n_head
-        self.heads = MultiHeadAttention(num_heads=n_head, head_size=head_size)
-        self.ffwd = FeedForward(n_embd)
+        self.heads = MultiHeadAttention(num_heads=n_head, head_size=head_size, jr_key=att_key)
+        self.ffwd = FeedForward(key=ffwd_key, n_embd=n_embd)
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
 
@@ -118,7 +128,6 @@ class Block (eqx.Module):
         return x, kvcache
 
 class GPTLanguageModel (eqx.Module):
-    key: jnp.ndarray
     block_size: int
     vocab_size: int
     n_embd: int
@@ -131,20 +140,24 @@ class GPTLanguageModel (eqx.Module):
     ln_f: nn.LayerNorm
     lm_head: nn.Linear
 
-    def __init__ (self, key: jnp.ndarray, block_size: int, vocab_size: int, n_embd: int, n_head: int, n_layer: int) -> None:
+    def __init__ (self, jr_key: jnp.ndarray, block_size: int, vocab_size: int, n_embd: int, n_head: int, n_layer: int) -> None:
         super().__init__()
-        self.key = key
+        
+        # split the key for seeding
+        token_key, position_key, lm_key, blocks_key = jr.split(jr_key, 4)
+        blocks_key = jr.split(blocks_key, n_layer)
+
         self.block_size = block_size
         self.vocab_size = vocab_size
         self.n_embd = n_embd
         self.n_head = n_head
         self.n_layer = n_layer
 
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = [Block(n_embd, n_head) for _ in range(n_layer)]
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd, key=token_key)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd, key=position_key)
+        self.blocks = [Block(n_embd=n_embd, n_head=n_head, key=blocks_key[i]) for i in range(n_layer)]
         self.ln_f = nn.LayerNorm(n_embd)
-        self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.lm_head = nn.Linear(n_embd, vocab_size, key=lm_key)
     
     def forward (self, idx: jnp.ndarray, targets: Optional[jnp.ndarray]=None, use_cache: bool=False, blocks_kvcache: List[KVCacheType]=[None] * n_layer) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], List[KVCacheType]]:
         B, T = idx.shape

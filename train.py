@@ -38,13 +38,13 @@ def estimate_loss(model) -> dict:
         losses = jnp.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
-            _, loss = model(X, Y)
+            _, loss, _ = jax.vmap(model)(X, Y) 
             losses = jax.ops.index_update(losses, k, loss)
         out[split] = losses.mean()
     return out
 
 def make(*, key: jnp.ndarray, block_size: int, n_embd: int, n_head: int, n_layer: int, vocab_size: int) -> GPTLanguageModel:
-    return GPTLanguageModel(key=key, block_size=block_size, n_embd=n_embd, n_head=n_head, n_layer=n_layer, vocab_size=vocab_size)
+    return GPTLanguageModel(jr_key=key, block_size=block_size, n_embd=n_embd, n_head=n_head, n_layer=n_layer, vocab_size=vocab_size)
 
 def save(filename, hyperparams, model):
     with open(filename, "wb") as f:
@@ -59,35 +59,40 @@ def load(filename):
         return eqx.tree_deserialise_leaves(f, model)
 
 if __name__ == "__main__":
-        
     # Get the current date and time
     current_date_time = datetime.now()
 
     # Format the date and time in a string
     formatted_date_time = current_date_time.strftime("%Y-%m-%d %H:%M:%S")
-    task = Task.init(project_name='nanogpt', task_name=formatted_date_time)
-    task.execute_remotely('default', clone=False, exit_process=True)
+    print(formatted_date_time)
 
+    # print("initializing the task")
+    # task = Task.init(project_name='nanogpt', task_name=formatted_date_time)
+    # task.execute_remotely('default', clone=False, exit_process=True)
+
+    print("training the model")
     model = GPTLanguageModel(key=jax.random.PRNGKey(0), **hyperparams)
-    params = model.parameters()
-    
+    print("model created")
+
     # create a jax optimizer
     optimizer = optax.adam(learning_rate)
-    opt_state = optimizer.init(params)
+    opt_state = optimizer.init(model)
+    print("optimizer created")
 
-    @jax.jit
-    def update(params, opt_state, xb, yb):
-        logits, loss = model.apply(params, xb, yb)
+    xb, yb = get_batch('train')
+    print(xb.shape)
+
+    @eqx.filter_jit
+    def update(model, opt_state, xb, yb):
+        logits, loss, grads = jax.vmap(model)(xb, yb) 
         # compute gradients
-        grads = jax.grad(lambda p, x, y: model.apply(p, x, y)[1])(params, xb, yb) # compute gradients
 
         # apply updates based on grads
         updates, opt_state = optimizer.update(grads, opt_state)
-        params = optax.apply_updates(params, updates) # update parameters
-        return params, opt_state, loss
-    
+        model = eqx.apply_updates(model, updates) # update model
+        return loss, model, opt_state
 
-
+    print("starting training")
     # training the model
     for steps in range(max_epochs):
         # every once in a while eval loss on train and val sets
@@ -95,12 +100,12 @@ if __name__ == "__main__":
             losses = estimate_loss(model)
             print(f"Step: {steps}, Train loss: {losses['train']:.2f}, Val loss: {losses['val']:.2f}")   
 
-            task.get_logger().report_scalar(title="losses", series="train", value=losses['train'], iteration=steps)
-            task.get_logger().report_scalar(title="losses", series="val", value=losses['val'], iteration=steps)
+            # task.get_logger().report_scalar(title="losses", series="train", value=losses['train'], iteration=steps)
+            # task.get_logger().report_scalar(title="losses", series="val", value=losses['val'], iteration=steps)
         
         xb, yb = get_batch('train')
-        params, opt_state, loss = update(params, opt_state, xb, yb)
+        loss, model, opt_state = update(model, opt_state, xb, yb)
 
-        task.get_logger().report_scalar(title="losses", series="train", value=loss, iteration=steps)
+        # task.get_logger().report_scalar(title="losses", series="train", value=loss, iteration=steps)
     
     save("gpt_model.eqx", hyperparams, model)

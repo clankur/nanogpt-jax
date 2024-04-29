@@ -4,7 +4,7 @@ import jax.random as jr
 import equinox as eqx
 import equinox.nn as nn
 
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Callable
 KVCacheType = Optional[Tuple[jnp.ndarray, jnp.ndarray]]
 
 block_size = 256
@@ -88,21 +88,32 @@ class MultiHeadAttention(eqx.Module):
         return out, kvcache
 
 class FeedForward (eqx.Module):
-    jr_key: jnp.ndarray
-    net: nn.Sequential
+    mlp: nn.Linear
+    output: nn.Linear
+    dropout: nn.Dropout
 
     def __init__ (self, key: jnp.ndarray, n_embd: int) -> None:
         super().__init__()
         linear_keys = jr.split(key, 2)
-        self.net = nn.Sequential([
-            nn.Linear(n_embd, 4 * n_embd, key=linear_keys[0]),
-            jax.nn.relu,
-            nn.Linear(4 * n_embd, n_embd, key=linear_keys[1]),
-            nn.Dropout(dropout)
-        ])
+
+        # nn.Sequential is not working with jax.nn.relu for some reason
+        # it gets 
+        #   TypeError: zeros_like requires ndarray or scalar arguments,
+        #   got <class 'jax._src.custom_derivatives.custom_jvp'>
+        # so moved to the forward pass
+
+        self.mlp = nn.Linear(n_embd, 4 * n_embd, key=linear_keys[0])
+        self.output = nn.Linear(4 * n_embd, n_embd, key=linear_keys[1])
+        self.dropout = nn.Dropout(dropout)
 
     def forward (self, x: jnp.ndarray) -> jnp.ndarray:
-        return self.net(x)
+        hidden = self.mlp(x)
+        hidden = jax.nn.relu(hidden)
+
+        output = self.output(hidden)
+        output = self.dropout(output)
+
+        return output
 
 class Block (eqx.Module):
     heads: MultiHeadAttention
@@ -136,15 +147,15 @@ class GPTLanguageModel (eqx.Module):
 
     token_embedding_table: nn.Embedding
     position_embedding_table: nn.Embedding
-    blocks: List[Block]
+    blocks: list
     ln_f: nn.LayerNorm
     lm_head: nn.Linear
 
-    def __init__ (self, jr_key: jnp.ndarray, block_size: int, vocab_size: int, n_embd: int, n_head: int, n_layer: int) -> None:
+    def __init__ (self, key: jnp.ndarray, block_size: int, vocab_size: int, n_embd: int, n_head: int, n_layer: int) -> None:
         super().__init__()
-        
+
         # split the key for seeding
-        token_key, position_key, lm_key, blocks_key = jr.split(jr_key, 4)
+        token_key, position_key, lm_key, blocks_key = jr.split(key, 4)
         blocks_key = jr.split(blocks_key, n_layer)
 
         self.block_size = block_size
@@ -159,7 +170,11 @@ class GPTLanguageModel (eqx.Module):
         self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size, key=lm_key)
     
+    def __call__(self, idx: jnp.ndarray, targets: Optional[jnp.ndarray]=None, use_cache: bool=False, blocks_kvcache: List[KVCacheType]=[None] * n_layer) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], List[KVCacheType]]:
+        return self.forward(idx, targets, use_cache, blocks_kvcache)
+
     def forward (self, idx: jnp.ndarray, targets: Optional[jnp.ndarray]=None, use_cache: bool=False, blocks_kvcache: List[KVCacheType]=[None] * n_layer) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], List[KVCacheType]]:
+        print(idx.shape)
         B, T = idx.shape
         tok_emb = self.token_embedding_table(idx)
         history_length = 0 if not blocks_kvcache[0] else blocks_kvcache[0][0].shape[2]
